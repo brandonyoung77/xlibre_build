@@ -1,0 +1,234 @@
+# syntax=docker/dockerfile:1.4
+
+# =============================================================================
+# Build Arguments (passed via docker-compose)
+# =============================================================================
+ARG XLIBRE_VERSION=25.1.8
+ARG MESON_OPTIONS=
+
+# =============================================================================
+# Stage 1: Build Environment
+# =============================================================================
+FROM debian:trixie AS builder
+
+ARG XLIBRE_VERSION
+ARG MESON_OPTIONS
+
+# Set default meson options for AMD Strix Halo if none provided
+ENV DEFAULT_MESON_OPTS=""
+
+LABEL maintainer="XLibre Community <xlibre@example.org>"
+LABEL description="XLibre X Server - Community-managed X11 display server"
+LABEL org.opencontainers.image.source="https://github.com/X11Libre/xserver"
+LABEL org.opencontainers.image.version="${XLIBRE_VERSION}"
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install build dependencies (FIXED: nettle-dev, libxfont-dev)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential devscripts debhelper-compat meson ninja-build git pkg-config fakeroot \
+    libx11-dev libxcb1-dev libxrandr-dev libxrender-dev libxinerama-dev libxext-dev \
+    xutils-dev libpciaccess-dev libxpresent-dev libpixman-1-dev libxkbfile-dev \
+    libxfont-dev libxcvt-dev libudev-dev libssl-dev mesa-common-dev libepoxy-dev \
+    libxcb-util-dev libxcb-xfixes0-dev libxcb-icccm4-dev libxcb-xkb-dev x11proto-dev \
+    libdrm-dev libxshmfence-dev libbsd-dev libgl1-mesa-dev libglu1-mesa-dev \
+    libinput-dev libxcb-randr0-dev libspice-protocol-dev libunwind-dev nettle-dev \
+    xtrans-dev libxkbcommon-dev libxmu-dev \
+    libxcb-render-util0-dev libxcb-image0-dev libxcb-keysyms1-dev \
+    libxcb-glx0-dev libxcb-errors-dev libxcb-dri3-dev libxcb-present-dev \
+    libxcb-xv0-dev libxcb-shm0-dev libxcb-shape0-dev libxcb-sync-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+
+
+WORKDIR /build
+
+# Clone XLibre source (dynamic version)
+COPY ./xserver /build/xserver-src
+
+WORKDIR /build/xserver-src
+
+# Fix module paths for Debian compliance
+RUN sed -i "s%^module_abi_tag =.*%module_abi_tag = ''%" meson.build && \
+    sed -i 's%^input_drivers_dir=.*%input_drivers_dir=@moduledir@/input%' xlibre-server.pc.in && \
+    sed -i 's%^video_drivers_dir=.*%video_drivers_dir=@moduledir@/drivers%' xlibre-server.pc.in && \
+    sed -i 's%^input_drivers_dir=.*%input_drivers_dir=@moduledir@/input%' xorg-server.pc.in && \
+    sed -i 's%^video_drivers_dir=.*%video_drivers_dir=@moduledir@/drivers%' xorg-server.pc.in
+
+# Configure and build with Meson (merge default + custom options)
+ARG MESON_OPTIONS
+RUN if [ -z "$MESON_OPTIONS" ]; then \
+      meson setup build --prefix=/usr --libdir=lib --buildtype=release --localstatedir=/var --sysconfdir=/etc/X11 $DEFAULT_MESON_OPTS; \
+    else \
+      meson setup build --prefix=/usr --libdir=lib --buildtype=release --localstatedir=/var --sysconfdir=/etc/X11 $DEFAULT_MESON_OPTS $MESON_OPTIONS; \
+    fi && \
+    ninja -C build
+
+# Install to staging directory
+RUN DESTDIR=/build/stage ninja -C build install
+
+# Extract ABI versions for packaging
+RUN mkdir -p /tmp/abi && \
+    pkg-config --variable=abi_videodrv /build/stage/usr/lib/pkgconfig/xlibre-server.pc > /tmp/abi/video 2>/dev/null || echo "25" > /tmp/abi/video && \
+    pkg-config --variable=abi_xinput /build/stage/usr/lib/pkgconfig/xlibre-server.pc > /tmp/abi/input 2>/dev/null || echo "15" > /tmp/abi/input
+
+# =============================================================================
+# Stage 2: Create Debian Packages
+# =============================================================================
+FROM debian:trixie AS package-creator
+
+ARG XLIBRE_VERSION
+ARG DEB_REVISION=1
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    dpkg-dev devscripts fakeroot && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /package
+
+# Copy built files and ABI info from builder
+COPY --from=builder /build/stage ./stage
+COPY --from=builder /build/xserver-src ./src
+COPY --from=builder /tmp/abi ./abi
+
+# Read ABI versions
+RUN VIDEO_ABI=$(cat ./abi/video) && \
+    INPUT_ABI=$(cat ./abi/input) && \
+    echo "VIDEO_ABI=$VIDEO_ABI" && echo "INPUT_ABI=$INPUT_ABI" && \
+    echo "VIDEO_ABI=$VIDEO_ABI" > /tmp/versions && \
+    echo "INPUT_ABI=$INPUT_ABI" >> /tmp/versions
+
+# Create debian/ directory structure for xlibre-server package
+RUN mkdir -p debian/xlibre-server/DEBIAN && \
+    mkdir -p debian/xlibre-server/usr/bin && \
+    mkdir -p debian/xlibre-server/usr/lib/xorg/modules && \
+    mkdir -p debian/xlibre-server/usr/share/doc/xlibre-server && \
+    mkdir -p debian/xlibre-server/etc/X11
+
+# Create dynamic main server control file with xorg-server system overrides
+RUN VIDEO_ABI=$(cat /tmp/versions | grep VIDEO_ABI | cut -d= -f2 | cut -d. -f1) && \
+    INPUT_ABI=$(cat /tmp/versions | grep INPUT_ABI | cut -d= -f2 | cut -d. -f1) && \
+    PREV_VIDEO_ABI=$((VIDEO_ABI - 1)) && \
+    PREV_INPUT_ABI=$((INPUT_ABI - 1)) && \
+    printf 'Package: xlibre-server\nVersion: %s-%s\nArchitecture: amd64\nMaintainer: XLibre Community <xlibre@example.org>\nInstalled-Size: 4096\nProvides: xserver-xorg-core, xorg-server, xserver-xorg-video-abi-%s, xserver-xorg-input-abi-%s\nConflicts: xserver-xorg-core, xorg-server, xserver-xorg-video-abi-%s, xserver-xorg-input-abi-%s\nReplaces: xserver-xorg-core, xorg-server\nDepends: libdrm2, libepoxy0, libgbm1, libgl1, libpixman-1-0, libx11-6, libxau6, libxcb1, libxdmcp6, libxext6, libxfont2, libxkbfile1, libxrandr2, libxrender1, libxshmfence1, mesa-vulkan-drivers\nRecommends: xlibre-server-dev, xfonts-base, xfonts-scalable, xfonts-cyrillic, x11-apps, x11-session-utils, x11-utils, x11-xserver-utils\nSuggests: xlibre-server-dbg\nSection: x11\nPriority: optional\nDescription: XLibre X server - community-managed X11 display server\n XLibre is the community-managed fork of the X.Org X server.\n It is a drop-in replacement for xserver-xorg-core.\nHomepage: https://github.com\n' \
+    "${XLIBRE_VERSION}" "${DEB_REVISION}" "${VIDEO_ABI}" "${INPUT_ABI}" "${PREV_VIDEO_ABI}" "${PREV_INPUT_ABI}" \
+    > debian/xlibre-server/DEBIAN/control
+
+
+RUN printf '#!/bin/sh\nset -e\ncase "$1" in\n    configure)\n        mkdir -p /etc/X11/xorg.conf.d\n        chmod 4755 /usr/bin/Xorg\n        ;;\nesac\nexit 0\n' > debian/xlibre-server/DEBIAN/postinst && \
+    printf '#!/bin/sh\nset -e\nexit 0\n' > debian/xlibre-server/DEBIAN/postrm
+
+RUN cp -a ./stage/usr/bin/Xorg ./stage/usr/bin/Xephyr debian/xlibre-server/usr/bin/ 2>/dev/null || true && \
+    cp -a ./stage/usr/lib/xorg/modules/* debian/xlibre-server/usr/lib/xorg/modules/ && \
+    cp -a ./stage/usr/share/X11 ./stage/usr/share/doc/xlibre-server debian/xlibre-server/usr/share/ 2>/dev/null || true && \
+    cp -a ./stage/etc/X11/* debian/xlibre-server/etc/X11/ 2>/dev/null || true
+
+# Set permissions
+RUN chmod 4755 debian/xlibre-server/usr/bin/Xorg && \
+    chmod 755 debian/xlibre-server/DEBIAN/postinst && \
+    chmod 755 debian/xlibre-server/DEBIAN/postrm
+
+# Build .deb package
+WORKDIR /package/debian/xlibre-server
+RUN mkdir -p /package/output && \
+    fakeroot dpkg-deb --build . /package/output/xlibre-server_${XLIBRE_VERSION}-${DEB_REVISION}_amd64.deb
+
+# =============================================================================
+# Stage 3: Create Development Package
+# =============================================================================
+FROM debian:trixie AS dev-package-creator
+
+ARG XLIBRE_VERSION
+ARG DEB_REVISION=1
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    dpkg-dev devscripts fakeroot && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /package
+
+# 1. Copy the entire staging tree to a temporary folder
+COPY --from=builder /build/stage ./tmp-stage
+COPY --from=builder /build/xserver-src ./src
+COPY --from=builder /tmp/abi ./abi
+
+# 2. Use a safe shell script to move and rename your dev folders
+RUN mkdir -p ./stage-include ./stage-pkgconfig ./stage-share-pkgconfig && \
+    [ -d ./tmp-stage/usr/include ]        && mv ./tmp-stage/usr/include/* ./stage-include/ 2>/dev/null || true; \
+    [ -d ./tmp-stage/usr/lib/pkgconfig ]  && mv ./tmp-stage/usr/lib/pkgconfig/* ./stage-pkgconfig/ 2>/dev/null || true; \
+    [ -d ./tmp-stage/usr/share/pkgconfig ] && mv ./tmp-stage/usr/share/pkgconfig/* ./stage-share-pkgconfig/ 2>/dev/null || true; \
+    rm -rf ./tmp-stage
+
+# Create package skeleton structure cleanly using absolute paths
+RUN mkdir -p ./debian/xlibre-server-dev/DEBIAN && \
+    mkdir -p ./debian/xlibre-server-dev/usr/include/xorg && \
+    mkdir -p ./debian/xlibre-server-dev/usr/lib/pkgconfig && \
+    mkdir -p ./debian/xlibre-server-dev/usr/share/pkgconfig && \
+    mkdir -p ./debian/xlibre-server-dev/usr/share/xserver-xorg && \
+    mkdir -p ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev
+
+# Create dynamic dev control file with clean development-only dependencies
+RUN printf 'Package: xlibre-server-dev\nVersion: %s-%s\nArchitecture: amd64\nMaintainer: XLibre Community <xlibre@example.org>\nInstalled-Size: 2048\nProvides: xserver-xorg-dev, xorg-server-dev\nConflicts: xserver-xorg-dev, xorg-server-dev\nReplaces: xserver-xorg-dev, xorg-server-dev\nDepends: xlibre-server (= %s-%s), libpixman-1-dev, libx11-dev, x11proto-dev, libxfont-dev, libgbm-dev, libpciaccess-dev\nSection: libdevel\nPriority: optional\nMulti-Arch: same\nDescription: XLibre X server development headers\n This package contains header files and pkg-config files for driver compilation.\nHomepage: https://github.com\n' \
+    "${XLIBRE_VERSION}" "${DEB_REVISION}" "${XLIBRE_VERSION}" "${DEB_REVISION}" \
+    > ./debian/xlibre-server-dev/DEBIAN/control
+
+
+
+# Create ABI version files (stripping decimal points to get the pure major integer)
+RUN RAW_VIDEO=$(cat ./abi/video) && \
+    RAW_INPUT=$(cat ./abi/input) && \
+    VIDEO_ABI=$(echo "$RAW_VIDEO" | cut -d. -f1) && \
+    INPUT_ABI=$(echo "$RAW_INPUT" | cut -d. -f1) && \
+    echo "xorg-input-abi-${INPUT_ABI}, xlibre-server (>= ${XLIBRE_VERSION})" > ./debian/xlibre-server-dev/usr/share/xserver-xorg/xinputdep && \
+    echo "xorg-video-abi-${VIDEO_ABI}, xlibre-server (>= ${XLIBRE_VERSION})" > ./debian/xlibre-server-dev/usr/share/xserver-xorg/videodrvdep
+
+
+# Copy files using explicit paths (avoids missing folder errors)
+RUN [ -d ./stage-include/xorg ] && cp -a ./stage-include/xorg/* ./debian/xlibre-server-dev/usr/include/xorg/ || true
+RUN cp -a ./stage-pkgconfig/* ./debian/xlibre-server-dev/usr/lib/pkgconfig/
+# Safe alternative: Only copy if the directory exists AND is not empty
+RUN if [ -d "./stage-share-pkgconfig" ] && [ "$(ls -A ./stage-share-pkgconfig 2>/dev/null)" ]; then \
+        cp -a ./stage-share-pkgconfig/* ./debian/xlibre-server-dev/usr/share/pkgconfig/; \
+    fi
+
+
+# Copy documentation and compress
+RUN cp -a ./src/ChangeLog ./src/README.md ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev/ && \
+    gzip -9 ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev/ChangeLog 2>/dev/null || true && \
+    gzip -9 ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev/README.md 2>/dev/null || true
+
+# Finalize binary package build
+WORKDIR /package/debian/xlibre-server-dev
+RUN mkdir -p /package/output && \
+    fakeroot dpkg-deb --build . /package/output/xlibre-server-dev_${XLIBRE_VERSION}-${DEB_REVISION}_amd64.deb
+
+
+# =============================================================================
+# Stage 4: Final Output
+# =============================================================================
+FROM debian:trixie-slim AS output
+
+# Create a secure, unmounted backup directory to hold the built packages
+RUN mkdir -p /tmp/artifacts
+
+# Copy the built debs into our secure internal stash
+COPY --from=package-creator /package/output/ /tmp/artifacts/
+COPY --from=dev-package-creator /package/output/ /tmp/artifacts/
+
+LABEL org.opencontainers.image.title="XLibre Debian Packages"
+LABEL org.opencontainers.image.description="Built xlibre-server and xlibre-server-dev packages"
+
+# Diagnostic check
+CMD ["ls", "-lh", "/tmp/artifacts/"]
+
+

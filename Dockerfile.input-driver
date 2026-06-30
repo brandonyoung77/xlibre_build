@@ -1,0 +1,63 @@
+# =============================================================================
+# Stage 1: Prepare the Hermetic Build Environment
+# =============================================================================
+FROM debian:trixie AS driver-builder
+
+ARG LIBINPUT_DRV_VERSION
+ARG DEB_REVISION=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Clean Architecture Method: Install dependencies required strictly for this driver
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential meson ninja-build pkg-config \
+    dpkg-dev devscripts fakeroot \
+    libinput-dev libudev-dev libmtdev-dev x11proto-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the libinput driver source files into the image layer securely
+COPY xf86-input-libinput/ .
+
+# Generate the runtime execution script
+RUN printf '#!/bin/sh\n\
+set -e\n\
+echo "========================================================================="\n\
+echo "Installing custom X Server packages from shared repository volume..."\n\
+echo "========================================================================="\n\
+apt-get update && apt-get install -y --no-install-recommends \
+    /incoming-debs/xlibre-server_*.deb \
+    /incoming-debs/xlibre-server-dev_*.deb \n\
+\n\
+echo "========================================================================="\n\
+echo "Configuring and compiling xf86-input-libinput via Meson..."\n\
+echo "========================================================================="\n\
+PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig" meson setup builddir --prefix=/usr --libdir=lib/xorg/modules\n\
+ninja -C builddir\n\
+\n\
+echo "========================================================================="\n\
+echo "Assembling Debian Package Layout..."\n\
+echo "========================================================================="\n\
+DESTDIR=/build/package-layout ninja -C builddir install\n\
+mkdir -p /build/package-layout/DEBIAN\n\
+printf "Package: xlibre-server-xorg-input-libinput\\nVersion: %s-%s\\nArchitecture: amd64\\nMaintainer: XLibre Community <xlibre@example.org>\\nDepends: xlibre-server, libc6, libinput10\\nProvides: xserver-xorg-input-libinput\\nConflicts: xserver-xorg-input-libinput\\nReplaces: xserver-xorg-input-libinput\\nSection: x11\\nPriority: optional\\nDescription: XLibre X server -- Libinput driver\\n This package provides the interface layer for keyboards, mice, and touchpads.\\n" > /build/package-layout/DEBIAN/control\n\
+\n\
+echo "========================================================================="\n\
+echo "Building final Debian driver package..."\n\
+echo "========================================================================="\n\
+mkdir -p /tmp/driver-out\n\
+fakeroot dpkg-deb --build /build/package-layout /tmp/driver-out/xlibre-server-xorg-input-libinput_%s-%s_amd64.deb\n\
+\n\
+echo "========================================================================="\n\
+echo "Exporting finished driver package back to host filesystem..."\n\
+echo "========================================================================="\n\
+mkdir -p /driver-output\n\
+cp -a /tmp/driver-out/* /driver-output/\n\
+echo "SUCCESS: Libinput Input Driver package exported successfully!"\n' \
+"${LIBINPUT_DRV_VERSION}" "${DEB_REVISION}" "${LIBINPUT_DRV_VERSION}" "${DEB_REVISION}" \
+> /entrypoint.sh && chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+

@@ -1,0 +1,65 @@
+# =============================================================================
+# Stage 1: Prepare the Hermetic Build Environment
+# =============================================================================
+FROM debian:trixie AS driver-builder
+
+ARG AMDGPU_VERSION
+ARG DEB_REVISION=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# CLEAN METHOD: Install all dependencies required specifically for the AMDGPU Driver build phase
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential meson ninja-build pkg-config \
+    dpkg-dev devscripts fakeroot \
+    libdrm-dev libudev-dev x11proto-dev \
+    libxfont-dev libgbm-dev libpciaccess-dev libgl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the driver source files into the image layer securely
+COPY xf86-video-amdgpu/ .
+
+# Generate the runtime execution script
+RUN printf '#!/bin/sh\n\
+set -e\n\
+echo "========================================================================="\n\
+echo "Installing custom X Server packages from shared repository volume..."\n\
+echo "========================================================================="\n\
+# Force apt to parse the incoming custom packages cleanly
+apt-get update && apt-get install -y --no-install-recommends \
+    /incoming-debs/xlibre-server_*.deb \
+    /incoming-debs/xlibre-server-dev_*.deb \n\
+\n\
+echo "========================================================================="\n\
+echo "Configuring and compiling xf86-video-amdgpu via Meson..."\n\
+echo "========================================================================="\n\
+PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig" meson setup builddir --prefix=/usr --libdir=lib/xorg/modules\n\
+ninja -C builddir\n\
+\n\
+echo "========================================================================="\n\
+echo "Assembling Debian Package Layout..."\n\
+echo "========================================================================="\n\
+DESTDIR=/build/package-layout ninja -C builddir install\n\
+mkdir -p /build/package-layout/DEBIAN\n\
+printf "Package: xlibre-server-xorg-video-amdgpu\\nVersion: %s-%s\\nArchitecture: amd64\\nMaintainer: XLibre Community <xlibre@example.org>\\nDepends: xlibre-server, libc6, libdrm-amdgpu1\\nProvides: xserver-xorg-video-amdgpu\\nConflicts: xserver-xorg-video-amdgpu\\nReplaces: xserver-xorg-video-amdgpu\\nSection: x11\\nPriority: optional\\nDescription: XLibre X server -- AMDGPU display driver\\n This package provides the driver for AMD Radeon graphics cards.\\n" > /build/package-layout/DEBIAN/control\n\
+\n\
+echo "========================================================================="\n\
+echo "Building final Debian driver package..."\n\
+echo "========================================================================="\n\
+mkdir -p /tmp/driver-out\n\
+fakeroot dpkg-deb --build /build/package-layout /tmp/driver-out/xlibre-server-xorg-video-amdgpu_%s-%s_amd64.deb\n\
+\n\
+echo "========================================================================="\n\
+echo "Exporting finished driver package back to host filesystem..."\n\
+echo "========================================================================="\n\
+mkdir -p /driver-output\n\
+cp -a /tmp/driver-out/* /driver-output/\n\
+echo "SUCCESS: AMDGPU Video Driver package exported successfully!"\n' \
+"${AMDGPU_VERSION}" "${DEB_REVISION}" "${AMDGPU_VERSION}" "${DEB_REVISION}" \
+> /entrypoint.sh && chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+
