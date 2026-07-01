@@ -9,6 +9,8 @@ services:
       target: output
     container_name: xserver-build
     restart: "no"
+    environment:
+      - MESON_OPTIONS="-Dxkb_output_dir=/var/lib/xkb -Ddri3=true -Dglamor=true"
     volumes:
       # Named volume shared with future driver containers
       - xlibre-deb-repo:/package-dist

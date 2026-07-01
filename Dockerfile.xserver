@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxcb-util-dev libxcb-xfixes0-dev libxcb-icccm4-dev libxcb-xkb-dev x11proto-dev \
     libdrm-dev libxshmfence-dev libbsd-dev libgl1-mesa-dev libglu1-mesa-dev \
     libinput-dev libxcb-randr0-dev libspice-protocol-dev libunwind-dev nettle-dev \
-    xtrans-dev libxkbcommon-dev libxmu-dev \
+    xtrans-dev libxkbcommon-dev libxmu-dev libegl-dev libgbm-dev \
     libxcb-render-util0-dev libxcb-image0-dev libxcb-keysyms1-dev \
     libxcb-glx0-dev libxcb-errors-dev libxcb-dri3-dev libxcb-present-dev \
     libxcb-xv0-dev libxcb-shm0-dev libxcb-shape0-dev libxcb-sync-dev \
