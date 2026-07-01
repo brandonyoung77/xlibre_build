@@ -98,19 +98,18 @@ COPY --from=builder /build/stage ./stage
 COPY --from=builder /build/xserver-src ./src
 COPY --from=builder /tmp/abi ./abi
 
-# Read ABI versions
+# Read and isolate raw ABI version fields
 RUN VIDEO_ABI=$(cat ./abi/video) && \
     INPUT_ABI=$(cat ./abi/input) && \
-    echo "VIDEO_ABI=$VIDEO_ABI" && echo "INPUT_ABI=$INPUT_ABI" && \
     echo "VIDEO_ABI=$VIDEO_ABI" > /tmp/versions && \
     echo "INPUT_ABI=$INPUT_ABI" >> /tmp/versions
 
-# Create debian/ directory structure for xlibre-server package
-RUN mkdir -p debian/xlibre-server/DEBIAN && \
-    mkdir -p debian/xlibre-server/usr/bin && \
-    mkdir -p debian/xlibre-server/usr/lib/xorg/modules && \
-    mkdir -p debian/xlibre-server/usr/share/doc/xlibre-server && \
-    mkdir -p debian/xlibre-server/etc/X11
+# Create complete, unified target package directory tree structure
+RUN mkdir -p debian/xlibre-server/DEBIAN \
+             debian/xlibre-server/usr/bin \
+             debian/xlibre-server/usr/lib/xorg/modules \
+             debian/xlibre-server/usr/share/doc/xlibre-server \
+             debian/xlibre-server/etc/X11
 
 # Create dynamic main server control file with xorg-server system overrides
 RUN VIDEO_ABI=$(cat /tmp/versions | grep VIDEO_ABI | cut -d= -f2 | cut -d. -f1) && \
@@ -121,21 +120,30 @@ RUN VIDEO_ABI=$(cat /tmp/versions | grep VIDEO_ABI | cut -d= -f2 | cut -d. -f1) 
     "${XLIBRE_VERSION}" "${DEB_REVISION}" "${VIDEO_ABI}" "${INPUT_ABI}" "${PREV_VIDEO_ABI}" "${PREV_INPUT_ABI}" \
     > debian/xlibre-server/DEBIAN/control
 
-
+# Create maintainer configuration handling scripts
 RUN printf '#!/bin/sh\nset -e\ncase "$1" in\n    configure)\n        mkdir -p /etc/X11/xorg.conf.d\n        chmod 4755 /usr/bin/Xorg\n        ;;\nesac\nexit 0\n' > debian/xlibre-server/DEBIAN/postinst && \
-    printf '#!/bin/sh\nset -e\nexit 0\n' > debian/xlibre-server/DEBIAN/postrm
+    printf '#!/bin/sh\nset -e\nexit 0\n' > debian/xlibre-server/DEBIAN/postrm && \
+    chmod 755 debian/xlibre-server/DEBIAN/postinst debian/xlibre-server/DEBIAN/postrm
 
-RUN cp -a ./stage/usr/bin/Xorg ./stage/usr/bin/Xephyr debian/xlibre-server/usr/bin/ 2>/dev/null || true && \
+# Copy built ancillary layout files securely
+RUN cp -a ./stage/usr/bin/Xephyr debian/xlibre-server/usr/bin/ 2>/dev/null || true && \
     cp -a ./stage/usr/lib/xorg/modules/* debian/xlibre-server/usr/lib/xorg/modules/ && \
     cp -a ./stage/usr/share/X11 ./stage/usr/share/doc/xlibre-server debian/xlibre-server/usr/share/ 2>/dev/null || true && \
     cp -a ./stage/etc/X11/* debian/xlibre-server/etc/X11/ 2>/dev/null || true
 
-# Set permissions
-RUN chmod 4755 debian/xlibre-server/usr/bin/Xorg && \
-    chmod 755 debian/xlibre-server/DEBIAN/postinst && \
-    chmod 755 debian/xlibre-server/DEBIAN/postrm
+# Copy your optimized Xorg binary to BOTH critical execution paths
+RUN cp -a ./stage/usr/bin/Xorg debian/xlibre-server/usr/bin/Xorg && \
+    cp -a ./stage/usr/bin/Xorg debian/xlibre-server/usr/lib/xorg/Xorg
 
-# Build .deb package
+# Create critical system symlinks for standard startx script redirection
+RUN ln -sf /usr/bin/Xorg debian/xlibre-server/usr/bin/X && \
+    ln -sf /usr/lib/xorg/Xorg debian/xlibre-server/usr/lib/xorg/X
+
+# Apply strict root execution SUID permission bits to core binary locations
+RUN chmod 4755 debian/xlibre-server/usr/bin/Xorg && \
+    chmod 4755 debian/xlibre-server/usr/lib/xorg/Xorg
+
+# Finalize binary package compilation build
 WORKDIR /package/debian/xlibre-server
 RUN mkdir -p /package/output && \
     fakeroot dpkg-deb --build . /package/output/xlibre-server_${XLIBRE_VERSION}-${DEB_REVISION}_amd64.deb
