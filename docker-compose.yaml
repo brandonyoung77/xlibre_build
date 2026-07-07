@@ -64,6 +64,22 @@ services:
       xserver-build:
         condition: service_completed_successfully
 
+  # Service 4: The Intel Video Driver Builder
+  xlibre-intel-driver-build:
+    build:
+      context: .
+      dockerfile: Dockerfile.intel-driver
+      args:
+        INTEL_DRV_VERSION: 25.0.2
+    container_name: xlibre-intel-driver-build
+    restart: "no"
+    volumes:
+      - xlibre-deb-repo:/incoming-debs:ro
+      - ./output/drivers:/driver-output
+    depends_on:
+      xserver-build:
+        condition: service_completed_successfully
+
 
 volumes:
   xlibre-deb-repo:

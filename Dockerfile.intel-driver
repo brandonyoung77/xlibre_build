@@ -1,0 +1,73 @@
+# =============================================================================
+# Stage 1: Prepare the Hermetic Build Environment
+# =============================================================================
+FROM debian:trixie AS driver-builder
+
+ARG INTEL_DRV_VERSION
+ARG DEB_REVISION=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# CLEAN METHOD: Install all dependencies required specifically for the Intel Video Driver build phase
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential meson ninja-build pkg-config \
+    dpkg-dev devscripts fakeroot \
+    libdrm-dev \
+    libpciaccess-dev libudev-dev libx11-dev libxfixes-dev \
+    libxext-dev libxrender-dev libxdamage-dev \
+    libxshmfence-dev libxxf86vm-dev libpng-dev \
+    cmake  libxv-dev  libxvmc-dev libx11-xcb-dev  libx11-dev \
+    libxcb-dri2-0-dev libxcb-util-dev valgrind libxrandr-dev \
+    libxcursor-dev libxss-dev libxinerama-dev libxtst-dev \
+    libxcb-dri3-dev mesa-common-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the intel driver source files into the image layer securely
+COPY xf86-video-intel/ .
+
+# Generate the runtime execution script
+RUN printf '#!/bin/sh\n\
+set -e\n\
+echo "========================================================================="\n\
+echo "Installing custom X Server packages from shared repository volume..."\n\
+echo "========================================================================="\n\
+apt-get update && apt-get install -y --no-install-recommends \\\n\
+/incoming-debs/xlibre-server_*.deb \\\n\
+/incoming-debs/xlibre-server-dev_*.deb \n\
+\n\
+echo "========================================================================="\n\
+echo "Configuring and compiling xf86-video-intel via Meson..."\n\
+echo "========================================================================="\n\
+# Add the architecture-specific multi-arch path so pkg-config finds x11-xcb, xv, and xvmc\n\
+export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"\n\
+meson setup builddir --prefix=/usr --libdir=lib/xorg/modules\n\
+ninja -C builddir\n\
+\n\
+echo "========================================================================="\n\
+echo "Assembling Debian Package Layout..."\n\
+echo "========================================================================="\n\
+DESTDIR=/build/package-layout ninja -C builddir install\n\
+mkdir -p /build/package-layout/DEBIAN\n\
+printf "Package: xlibre-server-xorg-video-intel\\nVersion: %s-%s\\nArchitecture: amd64\\nMaintainer: XLibre Community <xlibre@example.org>\\nDepends: xlibre-server, libc6, libdrm2, libdrm-intel1, libpixman-1-0, libx11-6, libxfixes3, libxext6, libxrender1, libpciaccess0, libpng16-16, libxdamage1, libxshmfence1, libxxf86vm1\\nProvides: xserver-xorg-video-intel\\nConflicts: xserver-xorg-video-intel\\nReplaces: xserver-xorg-video-intel\\nSection: x11\\nPriority: optional\\nDescription: XLibre X server -- Intel display driver\\n This package provides the driver for Intel integrated graphics chips.\\n Supports i810 through Skylake generations with SNA and UXA acceleration.\\nHomepage: https://github.com/X11Libre/xf86-video-intel\\n" > /build/package-layout/DEBIAN/control\n\
+\n\
+echo "========================================================================="\n\
+echo "Building final Debian driver package..."\n\
+echo "========================================================================="\n\
+mkdir -p /tmp/driver-out\n\
+fakeroot dpkg-deb --build /build/package-layout /tmp/driver-out/xlibre-server-xorg-video-intel_%s-%s_tiger_lake.deb\n\
+\n\
+echo "========================================================================="\n\
+echo "Exporting finished driver package back to host filesystem..."\n\
+echo "========================================================================="\n\
+mkdir -p /driver-output\n\
+cp -a /tmp/driver-out/* /driver-output/\n\
+echo "SUCCESS: Intel Video Driver package exported successfully!"\n' \
+"${INTEL_DRV_VERSION}" "${DEB_REVISION}" "${INTEL_DRV_VERSION}" "${DEB_REVISION}" \
+> /entrypoint.sh && chmod +x /entrypoint.sh
+
+
+
+ENTRYPOINT ["/entrypoint.sh"]
