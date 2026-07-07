@@ -62,8 +62,14 @@ RUN sed -i "s%^module_abi_tag =.*%module_abi_tag = ''%" meson.build && \
 # Configure and build with Meson (merge default + custom options)
 ARG MESON_OPTIONS
 RUN if [ -z "$MESON_OPTIONS" ]; then \
+      CFLAGS="-march=tigerlake -O3 -flto" \
+      CXXFLAGS="-march=tigerlake -O3 -flto" \
+      LDFLAGS="-flto" \
       meson setup build --prefix=/usr --libdir=lib --buildtype=release --localstatedir=/var --sysconfdir=/etc/X11 $DEFAULT_MESON_OPTS; \
     else \
+      CFLAGS="-march=tigerlake -O3 -flto" \
+      CXXFLAGS="-march=tigerlake -O3 -flto" \
+      LDFLAGS="-flto" \
       meson setup build --prefix=/usr --libdir=lib --buildtype=release --localstatedir=/var --sysconfdir=/etc/X11 $DEFAULT_MESON_OPTS $MESON_OPTIONS; \
     fi && \
     ninja -C build

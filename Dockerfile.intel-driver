@@ -41,7 +41,9 @@ apt-get update && apt-get install -y --no-install-recommends \\\n\
 echo "========================================================================="\n\
 echo "Configuring and compiling xf86-video-intel via Meson..."\n\
 echo "========================================================================="\n\
-# Add the architecture-specific multi-arch path so pkg-config finds x11-xcb, xv, and xvmc\n\
+export CFLAGS="-march=tigerlake -O3 -flto"\n\
+export CXXFLAGS="-march=tigerlake -O3 -flto"\n\
+export LDFLAGS="-flto"\n\
 export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"\n\
 meson setup builddir --prefix=/usr --libdir=lib/xorg/modules\n\
 ninja -C builddir\n\

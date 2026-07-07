@@ -34,6 +34,9 @@ apt-get update && apt-get install -y --no-install-recommends \
 echo "========================================================================="\n\
 echo "Configuring and compiling xf86-input-libinput via Meson..."\n\
 echo "========================================================================="\n\
+export CFLAGS="-march=tigerlake -O3 -flto"\n\
+export CXXFLAGS="-march=tigerlake -O3 -flto"\n\
+export LDFLAGS="-flto"\n\
 PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig" meson setup builddir --prefix=/usr --libdir=lib/xorg/modules\n\
 ninja -C builddir\n\
 \n\
