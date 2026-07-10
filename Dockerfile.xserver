@@ -178,8 +178,8 @@ COPY --from=builder /tmp/abi ./abi
 
 # 2. Use a safe shell script to move and rename your dev folders
 RUN mkdir -p ./stage-include ./stage-pkgconfig ./stage-share-pkgconfig && \
-    [ -d ./tmp-stage/usr/include ]        && mv ./tmp-stage/usr/include/* ./stage-include/ 2>/dev/null || true; \
-    [ -d ./tmp-stage/usr/lib/pkgconfig ]  && mv ./tmp-stage/usr/lib/pkgconfig/* ./stage-pkgconfig/ 2>/dev/null || true; \
+    [ -d ./tmp-stage/usr/include ] && mv ./tmp-stage/usr/include/* ./stage-include/ 2>/dev/null || true; \
+    [ -d ./tmp-stage/usr/lib/pkgconfig ] && mv ./tmp-stage/usr/lib/pkgconfig/* ./stage-pkgconfig/ 2>/dev/null || true; \
     [ -d ./tmp-stage/usr/share/pkgconfig ] && mv ./tmp-stage/usr/share/pkgconfig/* ./stage-share-pkgconfig/ 2>/dev/null || true; \
     rm -rf ./tmp-stage
 
@@ -191,14 +191,26 @@ RUN mkdir -p ./debian/xlibre-server-dev/DEBIAN && \
     mkdir -p ./debian/xlibre-server-dev/usr/share/xserver-xorg && \
     mkdir -p ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev
 
-# Create dynamic dev control file with clean development-only dependencies
-RUN printf 'Package: xlibre-server-dev\nVersion: %s-%s\nArchitecture: amd64\nMaintainer: XLibre Community <xlibre@example.org>\nInstalled-Size: 2048\nProvides: xserver-xorg-dev, xorg-server-dev\nConflicts: xserver-xorg-dev, xorg-server-dev\nReplaces: xserver-xorg-dev, xorg-server-dev\nDepends: xlibre-server (= %s-%s), libpixman-1-dev, libx11-dev, x11proto-dev, libxfont-dev, libgbm-dev, libpciaccess-dev\nSection: libdevel\nPriority: optional\nMulti-Arch: same\nDescription: XLibre X server development headers\n This package contains header files and pkg-config files for driver compilation.\nHomepage: https://github.com\n' \
-    "${XLIBRE_VERSION}" "${DEB_REVISION}" "${XLIBRE_VERSION}" "${DEB_REVISION}" \
-    > ./debian/xlibre-server-dev/DEBIAN/control
+# FIX 1: Cleaned up Provides string to follow strict Debian formatting
+RUN printf 'Package: xlibre-server-dev\n\
+Version: %s-%s\n\
+Architecture: amd64\n\
+Maintainer: XLibre Community <xlibre@example.org>\n\
+Installed-Size: 2048\n\
+Provides: xserver-xorg-dev, xorg-server-dev\n\
+Conflicts: xserver-xorg-dev, xorg-server-dev\n\
+Replaces: xserver-xorg-dev, xorg-server-dev\n\
+Depends: xlibre-server (= %s-%s), libpixman-1-dev, libx11-dev, x11proto-dev, libxfont-dev, libgbm-dev, libpciaccess-dev\n\
+Section: libdevel\n\
+Priority: optional\n\
+Multi-Arch: same\n\
+Description: XLibre X server development headers\n\
+ This package contains header files and pkg-config files for driver compilation.\n\
+Homepage: https://github.com\n' \
+"${XLIBRE_VERSION}" "${DEB_REVISION}" "${XLIBRE_VERSION}" "${DEB_REVISION}" \
+> ./debian/xlibre-server-dev/DEBIAN/control
 
-
-
-# Create ABI version files (stripping decimal points to get the pure major integer)
+# Create ABI tracking scripts
 RUN RAW_VIDEO=$(cat ./abi/video) && \
     RAW_INPUT=$(cat ./abi/input) && \
     VIDEO_ABI=$(echo "$RAW_VIDEO" | cut -d. -f1) && \
@@ -210,7 +222,17 @@ RUN RAW_VIDEO=$(cat ./abi/video) && \
 # Copy files using explicit paths (avoids missing folder errors)
 RUN [ -d ./stage-include/xorg ] && cp -a ./stage-include/xorg/* ./debian/xlibre-server-dev/usr/include/xorg/ || true
 RUN cp -a ./stage-pkgconfig/* ./debian/xlibre-server-dev/usr/lib/pkgconfig/
-# Safe alternative: Only copy if the directory exists AND is not empty
+
+# Generate an explicit xorg-server.pc alias fallback file (forced to prevent file-exists crashes)
+RUN if [ -f ./debian/xlibre-server-dev/usr/lib/pkgconfig/xlibre-server.pc ]; then \
+        ln -sf xlibre-server.pc ./debian/xlibre-server-dev/usr/lib/pkgconfig/xorg-server.pc; \
+    elif [ -f ./debian/xlibre-server-dev/usr/share/pkgconfig/xlibre-server.pc ]; then \
+        ln -sf xlibre-server.pc ./debian/xlibre-server-dev/usr/share/pkgconfig/xorg-server.pc; \
+    else \
+        echo "Native xorg-server.pc already handled by upstream build stage."; \
+    fi
+
+
 RUN if [ -d "./stage-share-pkgconfig" ] && [ "$(ls -A ./stage-share-pkgconfig 2>/dev/null)" ]; then \
         cp -a ./stage-share-pkgconfig/* ./debian/xlibre-server-dev/usr/share/pkgconfig/; \
     fi
@@ -244,5 +266,4 @@ LABEL org.opencontainers.image.description="Built xlibre-server and xlibre-serve
 
 # Diagnostic check
 CMD ["ls", "-lh", "/tmp/artifacts/"]
-
 
