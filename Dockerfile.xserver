@@ -152,7 +152,7 @@ RUN chmod 4755 debian/xlibre-server/usr/bin/Xorg && \
 # Finalize binary package compilation build
 WORKDIR /package/debian/xlibre-server
 RUN mkdir -p /package/output && \
-    fakeroot dpkg-deb --build . /package/output/xlibre-server_${XLIBRE_VERSION}-${DEB_REVISION}_amd64.deb
+    fakeroot dpkg-deb --build . /package/output/xlibre-server_${XLIBRE_VERSION}-${DEB_REVISION}_strix_halo.deb
 
 # =============================================================================
 # Stage 3: Create Development Package
@@ -246,7 +246,7 @@ RUN cp -a ./src/ChangeLog ./src/README.md ./debian/xlibre-server-dev/usr/share/d
 # Finalize binary package build
 WORKDIR /package/debian/xlibre-server-dev
 RUN mkdir -p /package/output && \
-    fakeroot dpkg-deb --build . /package/output/xlibre-server-dev_${XLIBRE_VERSION}-${DEB_REVISION}_amd64.deb
+    fakeroot dpkg-deb --build . /package/output/xlibre-server-dev_${XLIBRE_VERSION}-${DEB_REVISION}_strix_halo.deb
 
 
 # =============================================================================
