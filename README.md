@@ -1,14 +1,14 @@
-# XLibre Debian packages for AMD Strix Halo (Zen 5 / znver5)
+# XLibre Debian packages
 
 Builds [XLibre](https://xlibre.net) (the X.Org X server community fork) from
-source into installable Debian `.deb` packages, compiled with
-`-march=znver5 -O3 -flto` for Strix Halo hardware.
+source into installable Debian `.deb` packages.
 
 Produces:
 
 - `xlibre-server` / `xlibre-server-dev` — from the `xserver/` checkout
 - `xlibre-server-xorg-video-amdgpu` — from the `xf86-video-amdgpu/` checkout
 - `xlibre-server-xorg-input-libinput` — from the `xf86-input-libinput/` checkout
+- `xlibre-server-xorg-video-intel` — from the `xf86-video-intel/` checkout
 
 The driver packages are built against the server dev package (they install it
 from a shared named volume and compile against its `xorg-server.pc` pkg-config
@@ -33,6 +33,7 @@ files).
    - `./output/xlibre-server-dev_25.1.10-1_amd64.deb`
    - `./output/drivers/xlibre-server-xorg-video-amdgpu_25.1.1-1_amd64.deb`
    - `./output/drivers/xlibre-server-xorg-input-libinput_25.0.1-1_amd64.deb`
+   - `./output/drivers/xlibre-server-xorg-video-intel_25.0.2-1_amd64.deb`
 
    (The two server debs also land in the shared `xlibre-deb-repo` named volume,
    which the driver builds read from. Stale debs are cleared from that volume
