@@ -57,7 +57,7 @@ echo "========================================================================="
 echo "Building final Debian driver package..."\n\
 echo "========================================================================="\n\
 mkdir -p /tmp/driver-out\n\
-fakeroot dpkg-deb --build /build/package-layout /tmp/driver-out/xlibre-server-xorg-video-intel_%s-%s_tiger_lake.deb\n\
+fakeroot dpkg-deb --build /build/package-layout /tmp/driver-out/xlibre-server-xorg-video-intel_%s-%s_amd64.deb\n\
 \n\
 echo "========================================================================="\n\
 echo "Exporting finished driver package back to host filesystem..."\n\

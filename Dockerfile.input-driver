@@ -46,12 +46,8 @@ apt-get install -y --no-install-recommends \
 echo "========================================================================="
 echo "Configuring and compiling xf86-input-libinput via Meson..."
 echo "========================================================================="
-# -march=znver5: target hardware (AMD Strix Halo / Zen 5)
 # The module is installed into the moduledir read from the xorg-server pkg-config
 # file (xorg-server.pc -> xlibre-server.pc), i.e. /usr/lib/xorg/modules/<abi-tag>/input.
-CFLAGS="-march=znver5 -O3 -flto" \
-CXXFLAGS="-march=znver5 -O3 -flto" \
-LDFLAGS="-flto" \
 PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig" \
 meson setup builddir --prefix=/usr --libdir=lib
 ninja -C builddir

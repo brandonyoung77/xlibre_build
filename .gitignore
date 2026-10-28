@@ -1,6 +1,7 @@
 # Upstream source checkouts (kept next to the Dockerfiles for the build context)
 /xserver/
 /xf86-video-amdgpu/
+/xf86-video-intel/
 /xf86-input-libinput/
 
 # Built packages
