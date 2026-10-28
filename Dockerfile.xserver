@@ -3,7 +3,10 @@
 # =============================================================================
 # Build Arguments (passed via docker-compose)
 # =============================================================================
-ARG XLIBRE_VERSION=25.1.8
+ARG XLIBRE_VERSION=25.1.10
+# Meson options for the server build. Compose defaults these to the Strix
+# Halo values (-Dxkb_output_dir=/var/lib/xkb -Ddri3=true -Dglamor=true);
+# an empty value simply expands to nothing at the meson invocation below.
 ARG MESON_OPTIONS=
 
 # =============================================================================
@@ -13,9 +16,6 @@ FROM debian:trixie AS builder
 
 ARG XLIBRE_VERSION
 ARG MESON_OPTIONS
-
-# Set default meson options for AMD Strix Halo if none provided
-ENV DEFAULT_MESON_OPTS=""
 
 LABEL maintainer="XLibre Community <xlibre@example.org>"
 LABEL description="XLibre X Server - Community-managed X11 display server"
@@ -43,11 +43,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxcb-xv0-dev libxcb-shm0-dev libxcb-shape0-dev libxcb-sync-dev \
     && rm -rf /var/lib/apt/lists/*
 
-
-
 WORKDIR /build
 
-# Clone XLibre source (dynamic version)
+# Copy the XLibre source checkout (context = project root)
 COPY ./xserver /build/xserver-src
 
 WORKDIR /build/xserver-src
@@ -59,19 +57,13 @@ RUN sed -i "s%^module_abi_tag =.*%module_abi_tag = ''%" meson.build && \
     sed -i 's%^input_drivers_dir=.*%input_drivers_dir=@moduledir@/input%' xorg-server.pc.in && \
     sed -i 's%^video_drivers_dir=.*%video_drivers_dir=@moduledir@/drivers%' xorg-server.pc.in
 
-# Configure and build with Meson (merge default + custom options)
-ARG MESON_OPTIONS
-RUN if [ -z "$MESON_OPTIONS" ]; then \
-      CFLAGS="-march=znver5 -O3 -flto" \
-      CXXFLAGS="-march=znver5 -O3 -flto" \
-      LDFLAGS="-flto" \
-      meson setup build --prefix=/usr --libdir=lib --buildtype=release --localstatedir=/var --sysconfdir=/etc/X11 $DEFAULT_MESON_OPTS; \
-    else \
-      CFLAGS="-march=znver5 -O3 -flto" \
-      CXXFLAGS="-march=znver5 -O3 -flto" \
-      LDFLAGS="-flto" \
-      meson setup build --prefix=/usr --libdir=lib --buildtype=release --localstatedir=/var --sysconfdir=/etc/X11 $DEFAULT_MESON_OPTS $MESON_OPTIONS; \
-    fi && \
+# Configure and build with Meson. $MESON_OPTIONS carries the Strix Halo
+# defaults from compose (empty value expands to nothing).
+# -march=znver5: target hardware (AMD Strix Halo / Zen 5)
+RUN CFLAGS="-march=znver5 -O3 -flto" \
+    CXXFLAGS="-march=znver5 -O3 -flto" \
+    LDFLAGS="-flto" \
+    meson setup build --prefix=/usr --libdir=lib --buildtype=release --localstatedir=/var --sysconfdir=/etc/X11 $MESON_OPTIONS && \
     ninja -C build
 
 # Install to staging directory
@@ -83,7 +75,7 @@ RUN mkdir -p /tmp/abi && \
     pkg-config --variable=abi_xinput /build/stage/usr/lib/pkgconfig/xlibre-server.pc > /tmp/abi/input 2>/dev/null || echo "15" > /tmp/abi/input
 
 # =============================================================================
-# Stage 2: Create Debian Packages
+# Stage 2: Create the main (runtime) Debian package
 # =============================================================================
 FROM debian:trixie AS package-creator
 
@@ -99,35 +91,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /package
 
-# Copy built files and ABI info from builder
+# Copy built files, source and ABI info from the builder stage
 COPY --from=builder /build/stage ./stage
 COPY --from=builder /build/xserver-src ./src
 COPY --from=builder /tmp/abi ./abi
 
-# Read and isolate raw ABI version fields
-RUN VIDEO_ABI=$(cat ./abi/video) && \
-    INPUT_ABI=$(cat ./abi/input) && \
-    echo "VIDEO_ABI=$VIDEO_ABI" > /tmp/versions && \
-    echo "INPUT_ABI=$INPUT_ABI" >> /tmp/versions
-
-# Create complete, unified target package directory tree structure
+# Create the package directory tree
 RUN mkdir -p debian/xlibre-server/DEBIAN \
              debian/xlibre-server/usr/bin \
              debian/xlibre-server/usr/lib/xorg/modules \
              debian/xlibre-server/usr/share/doc/xlibre-server \
              debian/xlibre-server/etc/X11
 
-# Create dynamic main server control file with xorg-server system overrides
-RUN VIDEO_ABI=$(cat /tmp/versions | grep VIDEO_ABI | cut -d= -f2 | cut -d. -f1) && \
-    INPUT_ABI=$(cat /tmp/versions | grep INPUT_ABI | cut -d= -f2 | cut -d. -f1) && \
-    PREV_VIDEO_ABI=$((VIDEO_ABI - 1)) && \
-    PREV_INPUT_ABI=$((INPUT_ABI - 1)) && \
-    printf 'Package: xlibre-server\nVersion: %s-%s\nArchitecture: amd64\nMaintainer: XLibre Community <xlibre@example.org>\nInstalled-Size: 4096\nProvides: xserver-xorg-core, xorg-server, xserver-xorg-video-abi-%s, xserver-xorg-input-abi-%s\nConflicts: xserver-xorg-core, xorg-server, xserver-xorg-video-abi-%s, xserver-xorg-input-abi-%s\nReplaces: xserver-xorg-core, xorg-server\nDepends: libdrm2, libepoxy0, libgbm1, libgl1, libpixman-1-0, libx11-6, libxau6, libxcb1, libxdmcp6, libxext6, libxfont2, libxkbfile1, libxrandr2, libxrender1, libxshmfence1, mesa-vulkan-drivers\nRecommends: xlibre-server-dev, xfonts-base, xfonts-scalable, xfonts-cyrillic, x11-apps, x11-session-utils, x11-utils, x11-xserver-utils\nSuggests: xlibre-server-dbg\nSection: x11\nPriority: optional\nDescription: XLibre X server - community-managed X11 display server\n XLibre is the community-managed fork of the X.Org X server.\n It is a drop-in replacement for xserver-xorg-core.\nHomepage: https://github.com\n' \
-    "${XLIBRE_VERSION}" "${DEB_REVISION}" "${VIDEO_ABI}" "${INPUT_ABI}" "${PREV_VIDEO_ABI}" "${PREV_INPUT_ABI}" \
-    > debian/xlibre-server/DEBIAN/control
-
-# Create maintainer configuration handling scripts
-RUN printf '#!/bin/sh\nset -e\ncase "$1" in\n    configure)\n        mkdir -p /etc/X11/xorg.conf.d\n        chmod 4755 /usr/bin/Xorg\n        ;;\nesac\nexit 0\n' > debian/xlibre-server/DEBIAN/postinst && \
+# Maintainer scripts: create the X11 config dir and the SUID bit on Xorg.
+# /var/lib/xkb is the XKB_OUTPUT_DIR cache location used by the default
+# Strix Halo meson options (-Dxkb_output_dir=/var/lib/xkb).
+RUN printf '#!/bin/sh\nset -e\ncase "$1" in\n    configure)\n        mkdir -p /etc/X11/xorg.conf.d /var/lib/xkb\n        chmod 4755 /usr/bin/Xorg\n        ;;\nesac\nexit 0\n' > debian/xlibre-server/DEBIAN/postinst && \
     printf '#!/bin/sh\nset -e\nexit 0\n' > debian/xlibre-server/DEBIAN/postrm && \
     chmod 755 debian/xlibre-server/DEBIAN/postinst debian/xlibre-server/DEBIAN/postrm
 
@@ -149,13 +128,48 @@ RUN ln -sf /usr/bin/Xorg debian/xlibre-server/usr/bin/X && \
 RUN chmod 4755 debian/xlibre-server/usr/bin/Xorg && \
     chmod 4755 debian/xlibre-server/usr/lib/xorg/Xorg
 
-# Finalize binary package compilation build
+# Generate the control file last, so Installed-Size reflects the final tree
 WORKDIR /package/debian/xlibre-server
+RUN <<'EOF'
+set -eu
+VIDEO_ABI=$(head -n1 /package/abi/video)
+INPUT_ABI=$(head -n1 /package/abi/input)
+VIDEO_ABI=${VIDEO_ABI%%.*}
+INPUT_ABI=${INPUT_ABI%%.*}
+PREV_VIDEO_ABI=$((VIDEO_ABI - 1))
+PREV_INPUT_ABI=$((INPUT_ABI - 1))
+INSTALLED_SIZE=$(du -sk .)
+INSTALLED_SIZE=${INSTALLED_SIZE%%[[:space:]]*}
+[ -n "$INSTALLED_SIZE" ] || exit 1
+cat > DEBIAN/control <<CONTROL
+Package: xlibre-server
+Version: ${XLIBRE_VERSION}-${DEB_REVISION}
+Architecture: amd64
+Maintainer: XLibre Community <xlibre@example.org>
+Installed-Size: ${INSTALLED_SIZE}
+Provides: xserver-xorg-core, xorg-server, xserver-xorg-video-abi-${VIDEO_ABI}, xserver-xorg-input-abi-${INPUT_ABI}
+Conflicts: xserver-xorg-core, xorg-server, xserver-xorg-video-abi-${PREV_VIDEO_ABI}, xserver-xorg-input-abi-${PREV_INPUT_ABI}
+Replaces: xserver-xorg-core, xorg-server
+Depends: libdrm2, libepoxy0, libgbm1, libgl1, libpixman-1-0, libx11-6, libxau6, libxcb1, libxdmcp6, libxext6, libxfont2, libxkbfile1, libxrandr2, libxrender1, libxshmfence1, mesa-vulkan-drivers
+Recommends: xlibre-server-dev, xfonts-base, xfonts-scalable, xfonts-cyrillic, x11-apps, x11-session-utils, x11-utils, x11-xserver-utils
+Suggests: xlibre-server-dbg
+Section: x11
+Priority: optional
+Description: XLibre X server - community-managed X11 display server
+ XLibre is the community-managed fork of the X.Org X server.
+ It is a drop-in replacement for xserver-xorg-core.
+Homepage: https://xlibre.net/
+Vcs-Git: https://github.com/X11Libre/xserver.git
+Vcs-Browser: https://github.com/X11Libre/xserver
+CONTROL
+EOF
+
+# Build the .deb (standard Debian filename: name_version-revision_arch.deb)
 RUN mkdir -p /package/output && \
-    fakeroot dpkg-deb --build . /package/output/xlibre-server_${XLIBRE_VERSION}-${DEB_REVISION}_strix_halo.deb
+    fakeroot dpkg-deb --build . "/package/output/xlibre-server_${XLIBRE_VERSION}-${DEB_REVISION}_amd64.deb"
 
 # =============================================================================
-# Stage 3: Create Development Package
+# Stage 3: Create the development package
 # =============================================================================
 FROM debian:trixie AS dev-package-creator
 
@@ -176,7 +190,7 @@ COPY --from=builder /build/stage ./tmp-stage
 COPY --from=builder /build/xserver-src ./src
 COPY --from=builder /tmp/abi ./abi
 
-# 2. Use a safe shell script to move and rename your dev folders
+# 2. Move and rename the dev-relevant folders out of the staging tree
 RUN mkdir -p ./stage-include ./stage-pkgconfig ./stage-share-pkgconfig && \
     [ -d ./tmp-stage/usr/include ] && mv ./tmp-stage/usr/include/* ./stage-include/ 2>/dev/null || true; \
     [ -d ./tmp-stage/usr/lib/pkgconfig ] && mv ./tmp-stage/usr/lib/pkgconfig/* ./stage-pkgconfig/ 2>/dev/null || true; \
@@ -191,33 +205,13 @@ RUN mkdir -p ./debian/xlibre-server-dev/DEBIAN && \
     mkdir -p ./debian/xlibre-server-dev/usr/share/xserver-xorg && \
     mkdir -p ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev
 
-# FIX 1: Cleaned up Provides string to follow strict Debian formatting
-RUN printf 'Package: xlibre-server-dev\n\
-Version: %s-%s\n\
-Architecture: amd64\n\
-Maintainer: XLibre Community <xlibre@example.org>\n\
-Installed-Size: 2048\n\
-Provides: xserver-xorg-dev, xorg-server-dev\n\
-Conflicts: xserver-xorg-dev, xorg-server-dev\n\
-Replaces: xserver-xorg-dev, xorg-server-dev\n\
-Depends: xlibre-server (= %s-%s), libpixman-1-dev, libx11-dev, x11proto-dev, libxfont-dev, libgbm-dev, libpciaccess-dev\n\
-Section: libdevel\n\
-Priority: optional\n\
-Multi-Arch: same\n\
-Description: XLibre X server development headers\n\
- This package contains header files and pkg-config files for driver compilation.\n\
-Homepage: https://github.com\n' \
-"${XLIBRE_VERSION}" "${DEB_REVISION}" "${XLIBRE_VERSION}" "${DEB_REVISION}" \
-> ./debian/xlibre-server-dev/DEBIAN/control
-
 # Create ABI tracking scripts
-RUN RAW_VIDEO=$(cat ./abi/video) && \
-    RAW_INPUT=$(cat ./abi/input) && \
-    VIDEO_ABI=$(echo "$RAW_VIDEO" | cut -d. -f1) && \
-    INPUT_ABI=$(echo "$RAW_INPUT" | cut -d. -f1) && \
+RUN RAW_VIDEO=$(head -n1 ./abi/video) && \
+    RAW_INPUT=$(head -n1 ./abi/input) && \
+    VIDEO_ABI=${RAW_VIDEO%%.*} && \
+    INPUT_ABI=${RAW_INPUT%%.*} && \
     echo "xorg-input-abi-${INPUT_ABI}, xlibre-server (>= ${XLIBRE_VERSION})" > ./debian/xlibre-server-dev/usr/share/xserver-xorg/xinputdep && \
     echo "xorg-video-abi-${VIDEO_ABI}, xlibre-server (>= ${XLIBRE_VERSION})" > ./debian/xlibre-server-dev/usr/share/xserver-xorg/videodrvdep
-
 
 # Copy files using explicit paths (avoids missing folder errors)
 RUN [ -d ./stage-include/xorg ] && cp -a ./stage-include/xorg/* ./debian/xlibre-server-dev/usr/include/xorg/ || true
@@ -232,22 +226,49 @@ RUN if [ -f ./debian/xlibre-server-dev/usr/lib/pkgconfig/xlibre-server.pc ]; the
         echo "Native xorg-server.pc already handled by upstream build stage."; \
     fi
 
-
 RUN if [ -d "./stage-share-pkgconfig" ] && [ "$(ls -A ./stage-share-pkgconfig 2>/dev/null)" ]; then \
         cp -a ./stage-share-pkgconfig/* ./debian/xlibre-server-dev/usr/share/pkgconfig/; \
     fi
 
+# Copy documentation and compress. The 25.1.10 checkout has no ChangeLog, so
+# only copy it when present (no more silently-masked cp failure).
+RUN DOC_DIR=./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev && \
+    cp -a ./src/README.md "$DOC_DIR/" && \
+    if [ -f ./src/ChangeLog ]; then cp -a ./src/ChangeLog "$DOC_DIR/"; fi && \
+    gzip -9 "$DOC_DIR/README.md" && \
+    if [ -f "$DOC_DIR/ChangeLog" ]; then gzip -9 "$DOC_DIR/ChangeLog"; fi
 
-# Copy documentation and compress
-RUN cp -a ./src/ChangeLog ./src/README.md ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev/ && \
-    gzip -9 ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev/ChangeLog 2>/dev/null || true && \
-    gzip -9 ./debian/xlibre-server-dev/usr/share/doc/xlibre-server-dev/README.md 2>/dev/null || true
-
-# Finalize binary package build
+# Generate the control file last, so Installed-Size reflects the final tree
 WORKDIR /package/debian/xlibre-server-dev
-RUN mkdir -p /package/output && \
-    fakeroot dpkg-deb --build . /package/output/xlibre-server-dev_${XLIBRE_VERSION}-${DEB_REVISION}_strix_halo.deb
+RUN <<'EOF'
+set -eu
+INSTALLED_SIZE=$(du -sk .)
+INSTALLED_SIZE=${INSTALLED_SIZE%%[[:space:]]*}
+[ -n "$INSTALLED_SIZE" ] || exit 1
+cat > DEBIAN/control <<CONTROL
+Package: xlibre-server-dev
+Version: ${XLIBRE_VERSION}-${DEB_REVISION}
+Architecture: amd64
+Maintainer: XLibre Community <xlibre@example.org>
+Installed-Size: ${INSTALLED_SIZE}
+Provides: xserver-xorg-dev, xorg-server-dev
+Conflicts: xserver-xorg-dev, xorg-server-dev
+Replaces: xserver-xorg-dev, xorg-server-dev
+Depends: xlibre-server (= ${XLIBRE_VERSION}-${DEB_REVISION}), libpixman-1-dev, libx11-dev, x11proto-dev, libxfont-dev, libgbm-dev, libpciaccess-dev
+Section: libdevel
+Priority: optional
+Multi-Arch: same
+Description: XLibre X server development headers
+ This package contains header files and pkg-config files for driver compilation.
+Homepage: https://xlibre.net/
+Vcs-Git: https://github.com/X11Libre/xserver.git
+Vcs-Browser: https://github.com/X11Libre/xserver
+CONTROL
+EOF
 
+# Build the .deb (standard Debian filename: name_version-revision_arch.deb)
+RUN mkdir -p /package/output && \
+    fakeroot dpkg-deb --build . "/package/output/xlibre-server-dev_${XLIBRE_VERSION}-${DEB_REVISION}_amd64.deb"
 
 # =============================================================================
 # Stage 4: Final Output
@@ -266,4 +287,3 @@ LABEL org.opencontainers.image.description="Built xlibre-server and xlibre-serve
 
 # Diagnostic check
 CMD ["ls", "-lh", "/tmp/artifacts/"]
-
