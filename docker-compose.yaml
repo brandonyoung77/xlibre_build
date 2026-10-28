@@ -1,64 +1,89 @@
+# Build XLibre (https://xlibre.net) from source into Debian .deb packages for
+# AMD Strix Halo (Zen 5 / znver5) amd64 machines.
+#
+# The three upstream source checkouts (xserver/, xf86-video-amdgpu/,
+# xf86-input-libinput/) must sit next to this file at the tags listed in the
+# build args below. They are git-ignored and never part of this project.
+#
+# Usage: docker compose up --build
+#   -> ./output/xlibre-server_*.deb          (server + dev packages)
+#   -> ./output/drivers/*_driver*.deb        (amdgpu + libinput drivers)
+
 services:
   xserver-build:
     build:
       context: .
-      args:
-        XLIBRE_VERSION: 25.1.8
-        MESON_OPTIONS: ${MESON_OPTIONS}
       dockerfile: Dockerfile.xserver
       target: output
+      args:
+        XLIBRE_VERSION: "25.1.10"
+        DEB_REVISION: "1"
+        # Strix Halo defaults; override from the host with MESON_OPTIONS=...
+        MESON_OPTIONS: ${MESON_OPTIONS:--Dxkb_output_dir=/var/lib/xkb -Ddri3=true -Dglamor=true}
     container_name: xserver-build
     restart: "no"
     environment:
-      - MESON_OPTIONS="-Dxkb_output_dir=/var/lib/xkb -Ddri3=true -Dglamor=true"
+      # Mirrors the build args; used by the export command to verify the
+      # exact expected .deb names and fail loudly on a broken build
+      XLIBRE_VERSION: "25.1.10"
+      DEB_REVISION: "1"
     volumes:
-      # Named volume shared with future driver containers
+      # Named volume shared with the driver containers below
       - xlibre-deb-repo:/package-dist
       # Local host folder mount
       - ./output:/package-dist-host
-    # FIX: Copy explicitly out of the immutable /tmp/artifacts stash into the mounts
-    command: >
-      sh -c "
-      mkdir -p /package-dist /package-dist-host &&
-      cp -a /tmp/artifacts/* /package-dist/ 2>/dev/null || true &&
-      cp -a /tmp/artifacts/* /package-dist-host/ 2>/dev/null || true &&
-      echo 'Successfully exported packages to host and shared named volume!' &&
-      ls -lh /package-dist-host
-      "
+    # Copy the built debs out of the immutable /tmp/artifacts stash. Fails if
+    # any expected package is missing, and clears stale .debs from the named
+    # volume first so a re-run with a new XLIBRE_VERSION never mixes versions.
+    # (literal block: newlines are preserved; $$ is the compose escape for a shell $)
+    command: |
+      sh -c '
+      set -eu
+      for deb in "xlibre-server_$${XLIBRE_VERSION}-$${DEB_REVISION}_amd64.deb" "xlibre-server-dev_$${XLIBRE_VERSION}-$${DEB_REVISION}_amd64.deb"; do
+        [ -f "/tmp/artifacts/$$deb" ] || { echo "ERROR: /tmp/artifacts/$$deb is missing" >&2; ls -lh /tmp/artifacts >&2; exit 1; }
+      done
+      rm -f /package-dist/*.deb
+      mkdir -p /package-dist /package-dist-host
+      cp -a /tmp/artifacts/*.deb /package-dist/
+      cp -a /tmp/artifacts/*.deb /package-dist-host/
+      echo "Successfully exported packages to host and shared named volume"
+      ls -lh /package-dist /package-dist-host
+      '
 
- # Service 2: Example XLibre Video Driver Builder (e.g., Intel/AMD/Dummy)
+  # XLibre AMDGPU video driver builder
   xlibre-video-driver-build:
     build:
       context: .
-      args:
-        AMDGPU_VERSION: 25.1.1
       dockerfile: Dockerfile.amdgpu-driver
+      args:
+        AMDGPU_VERSION: "25.1.1"
+        DEB_REVISION: "1"
     container_name: xlibre-video-driver-build
     restart: "no"
     volumes:
       # Mount the SAME named volume! It appears inside this container automatically
       - xlibre-deb-repo:/incoming-debs:ro
-      # Optional: export finished driver package back to your host machine
+      # Export finished driver package back to the host machine
       - ./output/drivers:/driver-output
     depends_on:
       xserver-build:
-        # Crucial: This ensures the driver build ONLY starts AFTER the server build successfully completes and exits
+        # Crucial: this build ONLY starts AFTER the server build has successfully completed
         condition: service_completed_successfully
 
-  # Service 3: The Libinput Driver Builder
+  # XLibre Libinput input driver builder
   xlibre-libinput-driver-build:
     build:
       context: .
       dockerfile: Dockerfile.input-driver
       args:
-        # Separate version tracking specifically for the input layer
-        LIBINPUT_DRV_VERSION: 25.0.1
+        LIBINPUT_DRV_VERSION: "25.0.1"
+        DEB_REVISION: "1"
     container_name: xlibre-libinput-driver-build
     restart: "no"
     volumes:
-      # Mount the shared server debs repository as Read-Only
+      # Mount the shared server debs repository as read-only
       - xlibre-deb-repo:/incoming-debs:ro
-      # Drop the finished driver into a separate host directory for tracking cleanliness
+      # Drop the finished driver into a separate host directory
       - ./output/drivers:/driver-output
     depends_on:
       xserver-build:
@@ -83,4 +108,3 @@ services:
 
 volumes:
   xlibre-deb-repo:
-

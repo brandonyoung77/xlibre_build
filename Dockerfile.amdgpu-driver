@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.10
+
 # =============================================================================
 # Stage 1: Prepare the Hermetic Build Environment
 # =============================================================================
@@ -6,8 +8,10 @@ FROM debian:trixie AS driver-builder
 ARG AMDGPU_VERSION
 ARG DEB_REVISION=1
 ENV DEBIAN_FRONTEND=noninteractive
+# Baked into the image so the literal /entrypoint.sh below can use them at runtime
+ENV DRIVER_VERSION=${AMDGPU_VERSION} DEB_REVISION=${DEB_REVISION}
 
-# CLEAN METHOD: Install all dependencies required specifically for the AMDGPU Driver build phase
+# Install all dependencies required specifically for the AMDGPU driver build phase
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -22,44 +26,77 @@ WORKDIR /build
 # Copy the driver source files into the image layer securely
 COPY xf86-video-amdgpu/ .
 
-# Generate the runtime execution script
-RUN printf '#!/bin/sh\n\
-set -e\n\
-echo "========================================================================="\n\
-echo "Installing custom X Server packages from shared repository volume..."\n\
-echo "========================================================================="\n\
-# Force apt to parse the incoming custom packages cleanly
-apt-get update && apt-get install -y --no-install-recommends \
+# Runtime entrypoint: install the server debs from the shared volume, compile
+# the driver against the xlibre-server-dev pkg-config files (via the
+# xorg-server.pc alias), assemble the .deb and export it to the host.
+# Quoted heredoc delimiter = literal content (no build-time expansion).
+COPY --chmod=755 <<'EOF' /entrypoint.sh
+#!/bin/sh
+set -eu
+
+[ -n "$DRIVER_VERSION" ] || { echo "ERROR: DRIVER_VERSION is empty" >&2; exit 1; }
+
+echo "========================================================================="
+echo "Installing XLibre server packages from the shared repository volume..."
+echo "========================================================================="
+apt-get update
+apt-get install -y --no-install-recommends \
     /incoming-debs/xlibre-server_*.deb \
-    /incoming-debs/xlibre-server-dev_*.deb \n\
-\n\
-echo "========================================================================="\n\
-echo "Configuring and compiling xf86-video-amdgpu via Meson..."\n\
-echo "========================================================================="\n\
-PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig" meson setup builddir --prefix=/usr --libdir=lib/xorg/modules\n\
-ninja -C builddir\n\
-\n\
-echo "========================================================================="\n\
-echo "Assembling Debian Package Layout..."\n\
-echo "========================================================================="\n\
-DESTDIR=/build/package-layout ninja -C builddir install\n\
-mkdir -p /build/package-layout/DEBIAN\n\
-printf "Package: xlibre-server-xorg-video-amdgpu\\nVersion: %s-%s\\nArchitecture: amd64\\nMaintainer: XLibre Community <xlibre@example.org>\\nDepends: xlibre-server, libc6, libdrm-amdgpu1\\nProvides: xserver-xorg-video-amdgpu\\nConflicts: xserver-xorg-video-amdgpu\\nReplaces: xserver-xorg-video-amdgpu\\nSection: x11\\nPriority: optional\\nDescription: XLibre X server -- AMDGPU display driver\\n This package provides the driver for AMD Radeon graphics cards.\\n" > /build/package-layout/DEBIAN/control\n\
-\n\
-echo "========================================================================="\n\
-echo "Building final Debian driver package..."\n\
-echo "========================================================================="\n\
-mkdir -p /tmp/driver-out\n\
-fakeroot dpkg-deb --build /build/package-layout /tmp/driver-out/xlibre-server-xorg-video-amdgpu_%s-%s_amd64.deb\n\
-\n\
-echo "========================================================================="\n\
-echo "Exporting finished driver package back to host filesystem..."\n\
-echo "========================================================================="\n\
-mkdir -p /driver-output\n\
-cp -a /tmp/driver-out/* /driver-output/\n\
-echo "SUCCESS: AMDGPU Video Driver package exported successfully!"\n' \
-"${AMDGPU_VERSION}" "${DEB_REVISION}" "${AMDGPU_VERSION}" "${DEB_REVISION}" \
-> /entrypoint.sh && chmod +x /entrypoint.sh
+    /incoming-debs/xlibre-server-dev_*.deb
+
+echo "========================================================================="
+echo "Configuring and compiling xf86-video-amdgpu via Meson..."
+echo "========================================================================="
+# --libdir=lib puts the module in /usr/lib/xorg/modules/drivers, which the
+# XLibre loader checks (legacy/unversioned module path).
+PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig" \
+meson setup builddir --prefix=/usr --libdir=lib
+ninja -C builddir
+
+echo "========================================================================="
+echo "Assembling Debian package layout..."
+echo "========================================================================="
+DESTDIR=/build/package-layout ninja -C builddir install
+mkdir -p /build/package-layout/DEBIAN
+
+# Pin against the server version actually installed from the shared volume
+# (lower bound, so the driver also works on newer server releases).
+SERVER_VERSION=$(dpkg-query -W -f='${Version}' xlibre-server)
+[ -n "$SERVER_VERSION" ] || { echo "ERROR: xlibre-server is not installed" >&2; exit 1; }
+
+INSTALLED_SIZE=$(du -sk /build/package-layout)
+INSTALLED_SIZE=${INSTALLED_SIZE%%[[:space:]]*}
+[ -n "$INSTALLED_SIZE" ] || { echo "ERROR: could not compute Installed-Size" >&2; exit 1; }
+cat > /build/package-layout/DEBIAN/control <<CONTROL
+Package: xlibre-server-xorg-video-amdgpu
+Version: ${DRIVER_VERSION}-${DEB_REVISION}
+Architecture: amd64
+Maintainer: XLibre Community <xlibre@example.org>
+Installed-Size: ${INSTALLED_SIZE}
+Depends: xlibre-server (>= ${SERVER_VERSION}), libc6 (>= 2.41), libdrm2 (>= 2.4.89), libdrm-amdgpu1 (>= 2.4.97), libgbm1 (>= 25.0.7), libudev1 (>= 257.13)
+Provides: xserver-xorg-video-amdgpu
+Conflicts: xserver-xorg-video-amdgpu
+Replaces: xserver-xorg-video-amdgpu
+Section: x11
+Priority: optional
+Description: XLibre X server -- AMDGPU display driver
+ This package provides the driver for AMD Radeon graphics cards.
+Homepage: https://xlibre.net/
+CONTROL
+
+echo "========================================================================="
+echo "Building final Debian driver package..."
+echo "========================================================================="
+mkdir -p /tmp/driver-out
+fakeroot dpkg-deb --build /build/package-layout "/tmp/driver-out/xlibre-server-xorg-video-amdgpu_${DRIVER_VERSION}-${DEB_REVISION}_amd64.deb"
+
+echo "========================================================================="
+echo "Exporting finished driver package back to host filesystem..."
+echo "========================================================================="
+mkdir -p /driver-output
+cp -a /tmp/driver-out/*.deb /driver-output/
+ls -lh /driver-output
+echo "SUCCESS: AMDGPU video driver package exported successfully!"
+EOF
 
 ENTRYPOINT ["/entrypoint.sh"]
-
